@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeAll, afterEach, vi } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { gzipSync } from 'node:zlib';
 import {
   GET,
   parseFeed,
@@ -227,19 +228,56 @@ describe('rotas com rede simulada', () => {
     expect(r.headers.get('cache-control')).toContain('s-maxage=86400');
   });
 
+  it('catalog usa o espelho oficial, descompacta o .gz e nunca o site principal', async () => {
+    const seen: string[] = [];
+    const gz = gzipSync(Buffer.from(fx('pg_catalog.csv'), 'utf-8'));
+    vi.stubGlobal('fetch', vi.fn(async (u: URL | string) => {
+      seen.push(String(u));
+      return new Response(gz, { headers: { 'content-type': 'application/gzip' } });
+    }));
+    const r = await call('fn=catalog');
+    const body = await r.json();
+    expect(r.status, JSON.stringify(body)).toBe(200);
+    expect(body.books).toHaveLength(4);
+    expect(seen).toEqual(['https://gutenberg.pglaf.org/cache/epub/feeds/pg_catalog.csv.gz']);
+  });
+
+  it('catalog tenta o .csv quando o .gz falha', async () => {
+    const seen: string[] = [];
+    vi.stubGlobal('fetch', vi.fn(async (u: URL | string) => {
+      seen.push(String(u));
+      if (String(u).endsWith('.gz')) return new Response('fora do ar', { status: 503 });
+      return new Response(fx('pg_catalog.csv'), { headers: { 'content-type': 'text/csv' } });
+    }));
+    const r = await call('fn=catalog');
+    expect(r.status).toBe(200);
+    expect(seen.every((u) => u.startsWith('https://gutenberg.pglaf.org/'))).toBe(true);
+    expect(seen).toHaveLength(2);
+  });
+
+  it('catalog explica quando o espelho está fora do ar', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response('fora do ar', { status: 503 })));
+    const r = await call('fn=catalog');
+    expect(r.status).toBe(502);
+    expect((await r.json()).error.message).toBe('O Gutenberg respondeu 503.');
+  });
+
   it('book devolve o ePub e tenta o formato seguinte quando falha', async () => {
     const zip = new Uint8Array([0x50, 0x4b, 0x03, 0x04, ...new Array(600).fill(0)]);
     const seen: string[] = [];
     vi.stubGlobal('fetch', vi.fn(async (u: URL | string) => {
       seen.push(String(u));
-      if (String(u).endsWith('.epub3.images')) return new Response('não', { status: 404 });
+      if (String(u).endsWith('-images-3.epub')) return new Response('não', { status: 404 });
       return new Response(zip, { headers: { 'content-type': 'application/epub+zip' } });
     }));
     const r = await call('fn=book&id=55752');
     expect(r.status).toBe(200);
     expect(r.headers.get('content-type')).toBe('application/epub+zip');
     expect(new Uint8Array(await r.arrayBuffer()).length).toBe(zip.length);
-    expect(seen).toEqual(['https://www.gutenberg.org/ebooks/55752.epub3.images', 'https://www.gutenberg.org/ebooks/55752.epub.images']);
+    expect(seen).toEqual([
+      'https://gutenberg.pglaf.org/cache/epub/55752/pg55752-images-3.epub',
+      'https://gutenberg.pglaf.org/cache/epub/55752/pg55752-images.epub',
+    ]);
   });
 
   it('book recusa id estranho', async () => {

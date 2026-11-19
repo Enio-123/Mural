@@ -11,6 +11,10 @@
  *   article  url=<link da notícia>     -> matéria limpa (Readability)
  *   catalog                            -> livros em português do Project Gutenberg
  *   book     id=<número>               -> arquivo ePub
+ *
+ * Livros: o site www.gutenberg.org é só para pessoas e bloqueia acesso automático de
+ * servidores. Por isso a ponte usa o espelho oficial (gutenberg.pglaf.org), que existe
+ * justamente para isso e tem o mesmo catálogo e os mesmos arquivos.
  *   bsky     path=app.bsky.feed.getFeed&...  -> leitura pública do Bluesky (reserva)
  */
 import { XMLParser } from 'fast-xml-parser';
@@ -18,6 +22,7 @@ import { parseHTML } from 'linkedom';
 import readabilityPkg from '@mozilla/readability';
 import { lookup } from 'node:dns/promises';
 import { isIP } from 'node:net';
+import { gunzipSync } from 'node:zlib';
 
 type ReadabilityCtor = typeof import('@mozilla/readability').Readability;
 const { Readability } = readabilityPkg as unknown as { Readability: ReadabilityCtor };
@@ -789,26 +794,45 @@ export function catalogFromCsv(text: string, lang = 'pt'): CatalogBook[] {
   return out;
 }
 
+/** Espelho oficial do Project Gutenberg (PGLAF, hospedado pelo ibiblio). */
+export const PG_MIRROR = 'https://gutenberg.pglaf.org';
+
 async function catalog() {
-  const r = await get('https://www.gutenberg.org/cache/epub/feeds/pg_catalog.csv', {
-    ua: UA_APP,
-    accept: 'text/csv,*/*;q=0.5',
-    maxBytes: 60_000_000,
-    timeoutMs: 25_000,
-  });
-  if (r.status >= 400) throw new PonteError('http', `O Gutenberg respondeu ${r.status}.`);
-  const books = catalogFromCsv(new TextDecoder('utf-8').decode(r.bytes));
-  if (!books.length) throw new PonteError('catalogo', 'Não achei livros em português no catálogo.');
-  return { books, fetchedAt: new Date().toISOString() };
+  let lastError: PonteError | null = null;
+  for (const name of ['pg_catalog.csv.gz', 'pg_catalog.csv']) {
+    try {
+      const r = await get(`${PG_MIRROR}/cache/epub/feeds/${name}`, {
+        ua: UA_APP,
+        accept: '*/*',
+        maxBytes: 60_000_000,
+        timeoutMs: 25_000,
+      });
+      if (r.status >= 400) {
+        lastError = new PonteError('http', `O Gutenberg respondeu ${r.status}.`);
+        continue;
+      }
+      const b = r.bytes;
+      // o .gz pode chegar já descompactado, se o servidor marcar a compressão no cabeçalho
+      const raw = b.length > 2 && b[0] === 0x1f && b[1] === 0x8b ? gunzipSync(b) : b;
+      const books = catalogFromCsv(new TextDecoder('utf-8').decode(raw));
+      if (!books.length) throw new PonteError('catalogo', 'Não achei livros em português no catálogo.');
+      return { books, fetchedAt: new Date().toISOString() };
+    } catch (e) {
+      if (e instanceof PonteError && e.code === 'catalogo') throw e;
+      lastError = e instanceof PonteError ? e : new PonteError('catalogo', 'O catálogo do Gutenberg veio estragado.');
+    }
+  }
+  throw lastError ?? new PonteError('rede', 'Não consegui falar com o Gutenberg.');
 }
 
 async function book(p: URLSearchParams): Promise<Response> {
   const id = p.get('id') ?? '';
   if (!/^\d{1,6}$/.test(id)) throw new PonteError('param', 'Livro inválido.', 400);
   let tooBig = false;
-  for (const suffix of ['epub3.images', 'epub.images', 'epub.noimages']) {
+  // com imagens (ePub 3), com imagens (ePub 2) e só texto, nessa ordem
+  for (const file of [`pg${id}-images-3.epub`, `pg${id}-images.epub`, `pg${id}.epub`]) {
     try {
-      const r = await get(`https://www.gutenberg.org/ebooks/${id}.${suffix}`, {
+      const r = await get(`${PG_MIRROR}/cache/epub/${id}/${file}`, {
         ua: UA_APP,
         accept: 'application/epub+zip,*/*;q=0.5',
         maxBytes: 4_200_000,

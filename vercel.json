@@ -4,7 +4,7 @@
   "buildCommand": "npm run build",
   "outputDirectory": "dist",
   "functions": {
-    "api/ponte.ts": { "maxDuration": 30 }
+    "api/ponte.ts": { "maxDuration": 60 }
   },
   "headers": [
     { "source": "/sw.js", "headers": [{ "key": "Cache-Control", "value": "no-cache" }] },

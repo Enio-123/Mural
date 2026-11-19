@@ -38,7 +38,7 @@ export async function routes(ctx, BASE, epub) {
       if (p.startsWith('/api/games/user/')) return route.fulfill({ status: 200, contentType: 'application/x-ndjson', body: D.recentGames.map((g) => JSON.stringify(g)).join('\n') + '\n' });
       return json({ error: 'not found' }, 404);
     }
-    if (url.hostname === 'www.gutenberg.org') return route.fulfill({ status: 404, body: '' });
+    if (url.hostname === 'www.gutenberg.org' || url.hostname === 'gutenberg.pglaf.org') return route.fulfill({ status: 404, body: '' });
     return route.abort();
   });
 }

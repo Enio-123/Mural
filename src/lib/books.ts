@@ -39,8 +39,9 @@ export async function removeBook(id: string): Promise<void> {
   await idbDel('loc:' + id);
 }
 
+/** Capa pelo espelho oficial do Gutenberg: muitas capas de uma vez no site principal podem bloquear o seu IP. */
 export function gutenbergCover(gid: number): string {
-  return `https://www.gutenberg.org/cache/epub/${gid}/pg${gid}.cover.medium.jpg`;
+  return `https://gutenberg.pglaf.org/cache/epub/${gid}/pg${gid}.cover.medium.jpg`;
 }
 
 function isZip(buf: ArrayBuffer): boolean {
