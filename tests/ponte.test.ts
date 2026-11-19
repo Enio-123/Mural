@@ -2,6 +2,8 @@ import { describe, it, expect, beforeAll, afterEach, vi } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { gzipSync } from 'node:zlib';
+import { createServer } from 'node:http';
+import type { AddressInfo } from 'node:net';
 import {
   GET,
   parseFeed,
@@ -14,6 +16,7 @@ import {
   isPrivateIp,
   readMetaFromHtml,
   newsUrl,
+  resetCatalogCache,
 } from '../api/ponte';
 
 const fx = (f: string) => readFileSync(join(__dirname, 'fixtures', f), 'utf8');
@@ -25,6 +28,75 @@ beforeAll(() => {
 afterEach(() => {
   vi.unstubAllGlobals();
 });
+
+/** Espelho de mentira, com HEAD e Range como o Apache do espelho do Gutenberg. */
+async function mirror(
+  files: Record<string, Buffer>,
+  opts: { status?: number; slowMs?: number; cutFirstPart?: boolean } = {},
+): Promise<{ log: string[]; close: () => Promise<void> }> {
+  const log: string[] = [];
+  let cut = opts.cutFirstPart ?? false;
+  const server = createServer((req, res) => {
+    const path = new URL(req.url ?? '/', 'http://x').pathname;
+    log.push(`${req.method} ${path}${req.headers.range ? ' ' + req.headers.range : ''}`);
+    const send = () => {
+      if (opts.status) {
+        res.writeHead(opts.status);
+        res.end('fora do ar');
+        return;
+      }
+      const body = files[path];
+      if (!body) {
+        res.writeHead(404);
+        res.end();
+        return;
+      }
+      const m = /^bytes=(\d+)-(\d+)$/.exec(req.headers.range ?? '');
+      if (m) {
+        const a = Number(m[1]);
+        const b = Math.min(Number(m[2]), body.length - 1);
+        const part = body.subarray(a, b + 1);
+        res.writeHead(206, { 'Content-Length': part.length, 'Content-Range': `bytes ${a}-${b}/${body.length}`, 'Accept-Ranges': 'bytes' });
+        if (cut) {
+          cut = false;
+          res.write(part.subarray(0, 100));
+          res.destroy();
+          return;
+        }
+        res.end(part);
+        return;
+      }
+      res.writeHead(200, { 'Content-Length': body.length, 'Accept-Ranges': 'bytes', 'Content-Type': 'application/octet-stream' });
+      res.end(req.method === 'HEAD' ? undefined : body);
+    };
+    if (opts.slowMs) setTimeout(send, opts.slowMs);
+    else send();
+  });
+  await new Promise<void>((r) => server.listen(0, '127.0.0.1', () => r()));
+  process.env.PONTE_PG_MIRROR = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+  resetCatalogCache();
+  return {
+    log,
+    close: () => {
+      delete process.env.PONTE_PG_MIRROR;
+      resetCatalogCache();
+      server.closeAllConnections();
+      return new Promise((r) => server.close(() => r()));
+    },
+  };
+}
+
+/** Catálogo com mais de 1 MB: o do teste, mais milhares de livros em inglês e alguns em português no meio. */
+function bigCatalog(): Buffer {
+  const lines = fx('pg_catalog.csv').trimEnd().split('\n');
+  const out = [...lines];
+  for (let i = 0; i < 24000; i++) {
+    const pt = i % 5000 === 0;
+    const title = pt ? `Livro do meio ${i}` : `Filler title ${i}, with a comma\nand a line break`;
+    out.push(`${200000 + i},Text,2020-01-01,"${title}",${pt ? 'pt' : 'en'},"Autor, Fulano ${i}, 1900-1950",Fiction,PR,`);
+  }
+  return Buffer.from(out.join('\n') + '\n', 'utf-8');
+}
 
 function call(qs: string) {
   return GET(new Request('https://mural.test/api/ponte?' + qs));
@@ -220,46 +292,70 @@ describe('rotas com rede simulada', () => {
     expect((await r.json()).error.code).toBe('bloqueado');
   });
 
-  it('catalog filtra português', async () => {
-    vi.stubGlobal('fetch', vi.fn(async () => new Response(fx('pg_catalog.csv'), { headers: { 'content-type': 'text/csv' } })));
-    const r = await call('fn=catalog');
-    const body = await r.json();
-    expect(body.books).toHaveLength(4);
-    expect(r.headers.get('cache-control')).toContain('s-maxage=86400');
+  it('catalog vem do espelho oficial, compactado, e nunca do site principal', async () => {
+    const m = await mirror({ '/cache/epub/feeds/pg_catalog.csv.gz': gzipSync(Buffer.from(fx('pg_catalog.csv'), 'utf-8')) });
+    try {
+      const r = await call('fn=catalog');
+      const body = await r.json();
+      expect(r.status, JSON.stringify(body)).toBe(200);
+      expect(body.books).toHaveLength(4);
+      expect(r.headers.get('cache-control')).toContain('s-maxage=86400');
+      expect(m.log).toEqual(['HEAD /cache/epub/feeds/pg_catalog.csv.gz', 'GET /cache/epub/feeds/pg_catalog.csv.gz']);
+    } finally {
+      await m.close();
+    }
   });
 
-  it('catalog usa o espelho oficial, descompacta o .gz e nunca o site principal', async () => {
-    const seen: string[] = [];
-    const gz = gzipSync(Buffer.from(fx('pg_catalog.csv'), 'utf-8'));
-    vi.stubGlobal('fetch', vi.fn(async (u: URL | string) => {
-      seen.push(String(u));
-      return new Response(gz, { headers: { 'content-type': 'application/gzip' } });
-    }));
-    const r = await call('fn=catalog');
-    const body = await r.json();
-    expect(r.status, JSON.stringify(body)).toBe(200);
-    expect(body.books).toHaveLength(4);
-    expect(seen).toEqual(['https://gutenberg.pglaf.org/cache/epub/feeds/pg_catalog.csv.gz']);
+  it('catalog grande chega em pedaços paralelos, mesmo com linhas cortadas no meio', async () => {
+    const csv = bigCatalog();
+    const m = await mirror({ '/cache/epub/feeds/pg_catalog.csv': csv });
+    try {
+      const r = await call('fn=catalog');
+      const body = await r.json();
+      expect(r.status, JSON.stringify(body)).toBe(200);
+      expect(body.books).toHaveLength(4 + 5);
+      expect(body.books.map((b: { title: string }) => b.title)).toContain('Livro do meio 10000');
+      const parts = m.log.filter((l) => l.startsWith('GET /cache/epub/feeds/pg_catalog.csv bytes='));
+      expect(parts.length).toBeGreaterThan(1);
+      expect(m.log[0]).toBe('HEAD /cache/epub/feeds/pg_catalog.csv.gz');
+    } finally {
+      await m.close();
+    }
   });
 
-  it('catalog tenta o .csv quando o .gz falha', async () => {
-    const seen: string[] = [];
-    vi.stubGlobal('fetch', vi.fn(async (u: URL | string) => {
-      seen.push(String(u));
-      if (String(u).endsWith('.gz')) return new Response('fora do ar', { status: 503 });
-      return new Response(fx('pg_catalog.csv'), { headers: { 'content-type': 'text/csv' } });
-    }));
-    const r = await call('fn=catalog');
-    expect(r.status).toBe(200);
-    expect(seen.every((u) => u.startsWith('https://gutenberg.pglaf.org/'))).toBe(true);
-    expect(seen).toHaveLength(2);
+  it('catalog pede de novo o pedaço que caiu no meio', async () => {
+    const m = await mirror({ '/cache/epub/feeds/pg_catalog.csv': bigCatalog() }, { cutFirstPart: true });
+    try {
+      const r = await call('fn=catalog');
+      expect(r.status).toBe(200);
+      expect((await r.json()).books).toHaveLength(9);
+    } finally {
+      await m.close();
+    }
   });
 
   it('catalog explica quando o espelho está fora do ar', async () => {
-    vi.stubGlobal('fetch', vi.fn(async () => new Response('fora do ar', { status: 503 })));
-    const r = await call('fn=catalog');
-    expect(r.status).toBe(502);
-    expect((await r.json()).error.message).toBe('O Gutenberg respondeu 503.');
+    const m = await mirror({}, { status: 503 });
+    try {
+      const r = await call('fn=catalog');
+      expect(r.status).toBe(502);
+      expect((await r.json()).error.message).toBe('O Gutenberg respondeu 503.');
+    } finally {
+      await m.close();
+    }
+  });
+
+  it('catalog explica quando o espelho demora demais', async () => {
+    process.env.PONTE_CATALOG_MS = '600';
+    const m = await mirror({ '/cache/epub/feeds/pg_catalog.csv.gz': gzipSync(Buffer.from(fx('pg_catalog.csv'), 'utf-8')) }, { slowMs: 2000 });
+    try {
+      const r = await call('fn=catalog');
+      expect(r.status).toBe(504);
+      expect((await r.json()).error.code).toBe('tempo');
+    } finally {
+      delete process.env.PONTE_CATALOG_MS;
+      await m.close();
+    }
   });
 
   it('book devolve o ePub e tenta o formato seguinte quando falha', async () => {

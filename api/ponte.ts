@@ -23,6 +23,8 @@ import readabilityPkg from '@mozilla/readability';
 import { lookup } from 'node:dns/promises';
 import { isIP } from 'node:net';
 import { gunzipSync } from 'node:zlib';
+import { request as httpRequest, type IncomingHttpHeaders } from 'node:http';
+import { request as httpsRequest } from 'node:https';
 
 type ReadabilityCtor = typeof import('@mozilla/readability').Readability;
 const { Readability } = readabilityPkg as unknown as { Readability: ReadabilityCtor };
@@ -170,7 +172,15 @@ export async function get(raw: string, o: GetOpts = {}): Promise<Got> {
       }
       continue;
     }
-    const bytes = await readLimited(res, o.maxBytes ?? 3_000_000);
+    let bytes: Uint8Array;
+    try {
+      bytes = await readLimited(res, o.maxBytes ?? 3_000_000);
+    } catch (e) {
+      if (e instanceof PonteError) throw e;
+      const name = (e as Error)?.name;
+      if (name === 'TimeoutError' || name === 'AbortError') throw new PonteError('tempo', 'O site demorou demais pra responder.', 504);
+      throw new PonteError('rede', 'A conexão caiu no meio do caminho.', 502);
+    }
     return { url: url.href, status: res.status, headers: res.headers, bytes };
   }
   throw new PonteError('rede', 'Redirecionamentos demais.');
@@ -796,33 +806,147 @@ export function catalogFromCsv(text: string, lang = 'pt'): CatalogBook[] {
 
 /** Espelho oficial do Project Gutenberg (PGLAF, hospedado pelo ibiblio). */
 export const PG_MIRROR = 'https://gutenberg.pglaf.org';
+const pgMirror = () => process.env.PONTE_PG_MIRROR || PG_MIRROR;
+
+interface RawRes {
+  status: number;
+  headers: IncomingHttpHeaders;
+  body: Buffer;
+}
+
+/**
+ * Pedido HTTP cru: não descompacta nada e não segue redirecionamentos, para que pedaços
+ * (Range) de um arquivo .gz cheguem exatamente como estão no servidor.
+ */
+function rawRequest(url: URL, o: { method?: string; headers?: Record<string, string>; deadline: number; maxBytes: number }): Promise<RawRes> {
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const finish = (err: unknown, res?: RawRes) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      if (err) reject(err);
+      else resolve(res!);
+    };
+    const req = (url.protocol === 'http:' ? httpRequest : httpsRequest)(
+      url,
+      { method: o.method ?? 'GET', headers: { 'User-Agent': UA_APP, Accept: '*/*', 'Accept-Encoding': 'identity', ...o.headers } },
+      (res) => {
+        const chunks: Buffer[] = [];
+        let total = 0;
+        res.on('data', (c: Buffer) => {
+          total += c.length;
+          if (total > o.maxBytes) {
+            req.destroy();
+            finish(new PonteError('grande', 'Arquivo grande demais.', 413));
+            return;
+          }
+          chunks.push(c);
+        });
+        res.on('end', () => {
+          const declared = Number(res.headers['content-length'] ?? NaN);
+          if (o.method !== 'HEAD' && Number.isFinite(declared) && declared !== total) {
+            finish(new PonteError('rede', 'A conexão caiu no meio do caminho.', 502));
+            return;
+          }
+          finish(null, { status: res.statusCode ?? 0, headers: res.headers, body: Buffer.concat(chunks) });
+        });
+        res.on('error', () => finish(new PonteError('rede', 'A conexão caiu no meio do caminho.', 502)));
+      },
+    );
+    const timer = setTimeout(() => {
+      req.destroy();
+      finish(new PonteError('tempo', 'O site demorou demais pra responder.', 504));
+    }, Math.max(1, o.deadline - Date.now()));
+    req.on('error', () => finish(new PonteError('rede', 'Não consegui falar com o site.', 502)));
+    req.end();
+  });
+}
+
+async function rawFollow(raw: string, o: { method?: string; headers?: Record<string, string>; deadline: number; maxBytes: number }): Promise<RawRes & { url: URL }> {
+  let url = new URL(raw);
+  for (let hop = 0; hop < 4; hop++) {
+    const r = await rawRequest(url, o);
+    const loc = r.headers.location;
+    if ([301, 302, 303, 307, 308].includes(r.status) && loc) {
+      url = await checkUrl(new URL(loc, url).href);
+      continue;
+    }
+    return { ...r, url };
+  }
+  throw new PonteError('rede', 'Redirecionamentos demais.');
+}
+
+/**
+ * Baixa um arquivo grande em vários pedaços ao mesmo tempo (Range). O espelho entrega
+ * devagar por conexão; em paralelo o catálogo inteiro chega bem mais rápido.
+ */
+export async function downloadInParts(raw: string, deadline: number, maxBytes = 60_000_000): Promise<Buffer> {
+  const head = await rawFollow(raw, { method: 'HEAD', deadline, maxBytes: 0 });
+  const noHead = head.status === 405 || head.status === 501;
+  if (head.status >= 400 && !noHead) throw new PonteError('http', `O Gutenberg respondeu ${head.status}.`);
+  const size = noHead ? 0 : Number(head.headers['content-length'] ?? 0);
+  const ranges = String(head.headers['accept-ranges'] ?? '').toLowerCase().includes('bytes');
+  if (size > maxBytes) throw new PonteError('grande', 'Arquivo grande demais.', 413);
+  if (!size || !ranges || size < 1_000_000) {
+    const r = await rawFollow(head.url.href, { deadline, maxBytes });
+    if (r.status >= 400) throw new PonteError('http', `O Gutenberg respondeu ${r.status}.`);
+    return r.body;
+  }
+  const parts = Math.min(10, Math.ceil(size / 600_000));
+  const step = Math.ceil(size / parts);
+  const one = async (k: number): Promise<Buffer> => {
+    const a = k * step;
+    const b = Math.min(size, a + step) - 1;
+    let last: unknown;
+    for (let attempt = 0; attempt < 2 && Date.now() < deadline - 1000; attempt++) {
+      try {
+        const r = await rawRequest(head.url, { headers: { Range: `bytes=${a}-${b}` }, deadline, maxBytes: step + 1 });
+        if (r.status === 206 && r.body.length === b - a + 1) return r.body;
+        last = new PonteError('rede', 'O catálogo do Gutenberg chegou pela metade.', 502);
+      } catch (e) {
+        last = e;
+        if (e instanceof PonteError && e.code === 'tempo') break;
+      }
+    }
+    throw last ?? new PonteError('tempo', 'O site demorou demais pra responder.', 504);
+  };
+  const bufs = await Promise.all(Array.from({ length: parts }, (_, k) => one(k)));
+  return Buffer.concat(bufs);
+}
+
+let catalogMemo: { at: number; data: { books: CatalogBook[]; fetchedAt: string } } | null = null;
+
+/** Só para os testes. */
+export function resetCatalogCache(): void {
+  catalogMemo = null;
+}
 
 async function catalog() {
-  let lastError: PonteError | null = null;
+  if (catalogMemo && Date.now() - catalogMemo.at < 6 * 3_600_000) return catalogMemo.data;
+  const deadline = Date.now() + (Number(process.env.PONTE_CATALOG_MS) || 50_000);
+  let lastError: unknown = null;
   for (const name of ['pg_catalog.csv.gz', 'pg_catalog.csv']) {
+    if (Date.now() > deadline - 3000) break;
+    let raw: Buffer;
     try {
-      const r = await get(`${PG_MIRROR}/cache/epub/feeds/${name}`, {
-        ua: UA_APP,
-        accept: '*/*',
-        maxBytes: 60_000_000,
-        timeoutMs: 25_000,
-      });
-      if (r.status >= 400) {
-        lastError = new PonteError('http', `O Gutenberg respondeu ${r.status}.`);
-        continue;
-      }
-      const b = r.bytes;
-      // o .gz pode chegar já descompactado, se o servidor marcar a compressão no cabeçalho
-      const raw = b.length > 2 && b[0] === 0x1f && b[1] === 0x8b ? gunzipSync(b) : b;
-      const books = catalogFromCsv(new TextDecoder('utf-8').decode(raw));
-      if (!books.length) throw new PonteError('catalogo', 'Não achei livros em português no catálogo.');
-      return { books, fetchedAt: new Date().toISOString() };
+      const b = await downloadInParts(`${pgMirror()}/cache/epub/feeds/${name}`, deadline);
+      raw = b.length > 2 && b[0] === 0x1f && b[1] === 0x8b ? gunzipSync(b) : b;
     } catch (e) {
-      if (e instanceof PonteError && e.code === 'catalogo') throw e;
-      lastError = e instanceof PonteError ? e : new PonteError('catalogo', 'O catálogo do Gutenberg veio estragado.');
+      console.error('ponte catalog', name, e);
+      lastError = e instanceof PonteError ? e : new PonteError('catalogo', 'O catálogo do Gutenberg chegou estragado.');
+      continue;
     }
+    const books = catalogFromCsv(new TextDecoder('utf-8').decode(raw));
+    if (!books.length) throw new PonteError('catalogo', 'Não achei livros em português no catálogo.');
+    const data = { books, fetchedAt: new Date().toISOString() };
+    catalogMemo = { at: Date.now(), data };
+    return data;
   }
-  throw lastError ?? new PonteError('rede', 'Não consegui falar com o Gutenberg.');
+  if (lastError instanceof PonteError && lastError.code === 'tempo') {
+    throw new PonteError('tempo', 'O espelho do Gutenberg demorou demais pra mandar o catálogo. Tente de novo daqui a pouco.', 504);
+  }
+  throw lastError ?? new PonteError('tempo', 'O espelho do Gutenberg demorou demais pra mandar o catálogo.', 504);
 }
 
 async function book(p: URLSearchParams): Promise<Response> {
@@ -832,7 +956,7 @@ async function book(p: URLSearchParams): Promise<Response> {
   // com imagens (ePub 3), com imagens (ePub 2) e só texto, nessa ordem
   for (const file of [`pg${id}-images-3.epub`, `pg${id}-images.epub`, `pg${id}.epub`]) {
     try {
-      const r = await get(`${PG_MIRROR}/cache/epub/${id}/${file}`, {
+      const r = await get(`${pgMirror()}/cache/epub/${id}/${file}`, {
         ua: UA_APP,
         accept: 'application/epub+zip,*/*;q=0.5',
         maxBytes: 4_200_000,
