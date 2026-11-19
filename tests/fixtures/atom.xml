@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom" xmlns:media="http://search.yahoo.com/mrss/">
+  <title>Blog de Xadrez</title>
+  <link rel="alternate" href="https://exemplo.org/"/>
+  <entry>
+    <title type="html">Abertura italiana &amp;amp; ideias</title>
+    <link rel="alternate" href="https://exemplo.org/abertura-italiana"/>
+    <link rel="replies" href="https://exemplo.org/abertura-italiana#comentarios"/>
+    <published>2026-11-17T10:00:00Z</published>
+    <summary>Planos típicos para as brancas.</summary>
+    <media:thumbnail url="https://exemplo.org/img/italiana.jpg" width="640" height="360"/>
+  </entry>
+</feed>
