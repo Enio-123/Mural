@@ -87,7 +87,27 @@ export const catalog = {
     { id: 23055, title: 'Senhora', authors: ['José de Alencar'] },
     { id: 9301, title: 'Um livro qualquer de exemplo', authors: ['Autor de exemplo'] },
   ],
+  total: 78512,
 };
+
+// Busca no acervo inteiro (títulos reais do Gutenberg; números só de exemplo)
+const WORLD = [
+  { id: 1342, title: 'Pride and Prejudice', authors: ['Jane Austen'], lang: 'en' },
+  { id: 84, title: 'Frankenstein; Or, The Modern Prometheus', authors: ['Mary Wollstonecraft Shelley'], lang: 'en' },
+  { id: 11, title: "Alice's Adventures in Wonderland", authors: ['Lewis Carroll'], lang: 'en' },
+  { id: 2701, title: 'Moby Dick; Or, The Whale', authors: ['Herman Melville'], lang: 'en' },
+  { id: 5200, title: 'Metamorphosis', authors: ['Franz Kafka'], lang: 'en' },
+  { id: 22367, title: 'Die Verwandlung', authors: ['Franz Kafka'], lang: 'de' },
+  { id: 2000, title: 'Don Quijote', authors: ['Miguel de Cervantes Saavedra'], lang: 'es' },
+  { id: 135, title: 'Les Misérables', authors: ['Victor Hugo'], lang: 'fr' },
+];
+
+export function library(q, lang) {
+  const words = (q || '').toLowerCase().split(/\s+/).filter(Boolean);
+  const pool = lang && lang !== 'todos' ? WORLD.filter((b) => b.lang === lang) : WORLD;
+  const books = words.length ? pool.filter((b) => words.every((w) => (b.title + ' ' + b.authors.join(' ')).toLowerCase().includes(w))) : pool;
+  return { books, total: lang === 'en' ? 60231 : 78512, all: 78512 };
+}
 
 const author = (n) => ({ did: 'did:plc:exemplo' + n, handle: `exemplo${n}.bsky.social`, displayName: `Conta de exemplo ${n}`, avatar: img('avatar' + n, 96, 96) });
 

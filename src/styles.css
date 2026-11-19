@@ -2290,3 +2290,32 @@ button.cover-img {
   flex: 1 1 0;
   padding-right: 3px;
 }
+
+/* ------------------------------------------------------- biblioteca */
+
+.lib-count {
+  max-width: 680px;
+  margin: -6px auto 8px;
+  padding: 0 var(--page-x);
+}
+
+.lib-langs {
+  max-width: 680px;
+  margin: 0 auto;
+}
+
+.lib-list.stale {
+  opacity: 0.55;
+  transition: opacity 0.2s;
+}
+
+.book-row .lang-tag {
+  align-self: flex-start;
+  margin-top: 4px;
+}
+
+.lib-more {
+  display: flex;
+  width: calc(100% - 2 * var(--page-x));
+  margin: 14px auto 0;
+}

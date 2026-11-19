@@ -1,10 +1,10 @@
 import { useMemo, useRef, useState } from 'react';
-import { classics, gutenbergCover, importFile, library, removeBook, searchCatalog, sortedLibrary, type BookMeta } from '../lib/books';
+import { BOOK_LANGS, classics, gutenbergCover, importFile, langName, library, removeBook, searchCatalog, sortedLibrary, type BookMeta, type CatalogBook } from '../lib/books';
 import { errorText } from '../lib/api';
 import { useNav } from '../lib/nav';
 import { TopBar, Spinner, ErrorBox, Sheet, toast } from './common';
 import { CoverArt, ShelfBook } from './BookCover';
-import { useCatalog, useOpenClassic } from './books-data';
+import { useCatalog, useLibrarySearch, useOpenClassic } from './books-data';
 import { Icon } from './icons';
 
 export function BooksScreen() {
@@ -13,16 +13,22 @@ export function BooksScreen() {
   const catalog = useCatalog();
   const { busy, open } = useOpenClassic();
   const [q, setQ] = useState('');
+  const [lang, setLang] = useState('pt');
+  const remote = useLibrarySearch(q, lang, lang !== 'pt');
   const [importing, setImporting] = useState(false);
   const [edit, setEdit] = useState(false);
   const [removing, setRemoving] = useState<BookMeta | null>(null);
   const fileRef = useRef<HTMLInputElement>(null);
 
   const have = useMemo(() => new Set(books.map((b) => b.id)), [books]);
-  const list = useMemo(() => {
+  const local = useMemo(() => {
     if (!catalog.books) return [];
     return q.trim() ? searchCatalog(catalog.books, q) : classics(catalog.books);
   }, [catalog.books, q]);
+  const isLocal = lang === 'pt';
+  const list: CatalogBook[] = isLocal ? local : remote.books ?? [];
+  const all = remote.all ?? catalog.total;
+  const fmt = (n: number) => new Intl.NumberFormat('pt-BR').format(n);
 
   const onFile = async (f: File | undefined) => {
     if (!f) return;
@@ -81,7 +87,17 @@ export function BooksScreen() {
       )}
 
       <div className="shelf-head" style={{ paddingTop: 26 }}>
-        <h2>Clássicos grátis em português</h2>
+        <h2>Biblioteca grátis</h2>
+      </div>
+      <p className="lib-count muted small">
+        {all ? `${fmt(all)} livros em domínio público, de graça, pra ler no app.` : 'Livros em domínio público, de graça, pra ler no app.'}
+      </p>
+      <div className="chips lib-langs" role="group" aria-label="Idioma dos livros">
+        {BOOK_LANGS.map(([code, name]) => (
+          <button key={code} className="chip" aria-pressed={lang === code} onClick={() => setLang(code)}>
+            {name}
+          </button>
+        ))}
       </div>
       <div className="search-box" style={{ maxWidth: 680, margin: '0 auto' }}>
         <Icon name="search" />
@@ -89,47 +105,63 @@ export function BooksScreen() {
           className="input"
           type="search"
           enterKeyHint="search"
-          placeholder="Buscar título ou autor"
+          placeholder={isLocal ? 'Buscar título ou autor' : `Buscar entre ${remote.total ? fmt(remote.total) + ' ' : 'os '}livros`}
           value={q}
           onChange={(e) => setQ(e.target.value)}
-          aria-label="Buscar nos clássicos"
+          aria-label="Buscar na biblioteca"
         />
       </div>
       <div style={{ maxWidth: 680, margin: '0 auto', paddingBottom: 40 }}>
-        {catalog.error && !catalog.books && (
+        {isLocal && catalog.error && !catalog.books && (
           <div style={{ padding: '8px 16px' }}>
             <ErrorBox message={catalog.error} onRetry={catalog.retry} />
           </div>
         )}
-        {!catalog.books && !catalog.error && <Spinner label="Carregando os clássicos" />}
-        {catalog.books && list.length === 0 && <p className="empty">{q.trim() ? 'Nada com esse nome nos livros em português.' : 'Nenhum livro agora.'}</p>}
-        {list.map((b) => {
-          const id = 'g-' + b.id;
-          const inShelf = have.has(id);
-          return (
-            <button key={b.id} className="book-row" onClick={() => void open(b)} disabled={busy !== null}>
-              <div className="book-thumb">
-                <CoverArt title={b.title} author={b.authors.join(', ')} src={gutenbergCover(b.id)} />
-              </div>
-              <div className="book-text">
-                <b>{b.title}</b>
-                <span className="muted small">{b.authors.join(', ') || 'Autor desconhecido'}</span>
-              </div>
-              <span className="book-state">
-                {busy === id ? (
-                  <div className="spinner" />
-                ) : inShelf ? (
-                  'Ler'
-                ) : (
-                  <>
-                    <Icon name="download" />
-                    <span className="sr-only">Baixar</span>
-                  </>
-                )}
-              </span>
-            </button>
-          );
-        })}
+        {!isLocal && remote.error && (
+          <div style={{ padding: '8px 16px' }}>
+            <ErrorBox message={remote.error} onRetry={remote.retry} />
+          </div>
+        )}
+        {isLocal && !catalog.books && !catalog.error && <Spinner label="Carregando os clássicos" />}
+        {!isLocal && !remote.books && !remote.error && <Spinner label="Procurando na biblioteca" />}
+        {(isLocal ? catalog.books : remote.books) && list.length === 0 && (
+          <p className="empty">{q.trim() ? `Nada com esse nome ${isLocal ? 'em português' : lang === 'todos' ? 'na biblioteca' : 'em ' + langName(lang).toLowerCase()}.` : 'Nenhum livro agora.'}</p>
+        )}
+        <div className={'lib-list' + (!isLocal && remote.loading && remote.books ? ' stale' : '')}>
+          {list.map((b) => {
+            const id = 'g-' + b.id;
+            const inShelf = have.has(id);
+            return (
+              <button key={b.id} className="book-row" onClick={() => void open(b)} disabled={busy !== null}>
+                <div className="book-thumb">
+                  <CoverArt title={b.title} author={b.authors.join(', ')} src={gutenbergCover(b.id)} />
+                </div>
+                <div className="book-text">
+                  <b>{b.title}</b>
+                  <span className="muted small">{b.authors.join(', ') || 'Autor desconhecido'}</span>
+                  {b.lang && b.lang !== 'pt' && lang === 'todos' && <span className="tag lang-tag">{langName(b.lang)}</span>}
+                </div>
+                <span className="book-state">
+                  {busy === id ? (
+                    <div className="spinner" />
+                  ) : inShelf ? (
+                    'Ler'
+                  ) : (
+                    <>
+                      <Icon name="download" />
+                      <span className="sr-only">Baixar</span>
+                    </>
+                  )}
+                </span>
+              </button>
+            );
+          })}
+        </div>
+        {isLocal && q.trim() && catalog.books && (
+          <button className="btn ghost lib-more" onClick={() => setLang('todos')}>
+            <Icon name="search" /> Procurar “{q.trim()}” em todos os idiomas
+          </button>
+        )}
         <p className="note" style={{ padding: '12px 16px 0' }}>
           Livros em domínio público do Projeto Gutenberg. Eles e os seus ePubs ficam guardados só neste celular e funcionam sem internet.
         </p>

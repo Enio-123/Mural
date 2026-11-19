@@ -17,6 +17,8 @@ import {
   readMetaFromHtml,
   newsUrl,
   resetCatalogCache,
+  booksFromCsv,
+  searchBooks,
 } from '../api/ponte';
 
 const fx = (f: string) => readFileSync(join(__dirname, 'fixtures', f), 'utf8');
@@ -387,5 +389,65 @@ describe('rotas com rede simulada', () => {
     const ok = await call('fn=bsky&path=app.bsky.feed.getFeed&feed=at://x/app.bsky.feed.generator/y&limit=5');
     expect(ok.status).toBe(200);
     expect(await ok.json()).toEqual({ feed: [] });
+  });
+});
+
+const WORLD = [
+  '11,Text,1994-01-01,"Alice\'s Adventures in Wonderland",en,"Carroll, Lewis, 1832-1898",,PR,',
+  '28885,Text,2009-01-01,"Alice\'s Adventures in Wonderland\nIllustrated by Arthur Rackham",en,"Carroll, Lewis, 1832-1898",,PR,',
+  '84,Text,1993-10-01,"Frankenstein; Or, The Modern Prometheus",en,"Shelley, Mary Wollstonecraft, 1797-1851",,PR,',
+  '42671,Text,2013-05-01,Pride and Prejudice,en,"Austen, Jane, 1775-1817",,PR,',
+  '1,Text,1971-12-01,The Declaration of Independence of the United States of America,en,"Jefferson, Thomas, 1743-1826",,E,',
+  '2000,Text,1999-12-01,Don Quijote,es,"Cervantes Saavedra, Miguel de, 1547-1616",,PQ,',
+  '22367,Text,2007-08-01,Die Verwandlung,de,"Kafka, Franz, 1883-1924",,PT,',
+  '5200,Text,2005-08-01,Metamorphosis,en,"Kafka, Franz, 1883-1924",,PT,',
+  '70000,Text,2023-01-01,"Contes bilingues",en; fr,"Anonyme",,PQ,',
+].join('\n');
+
+describe('busca no Gutenberg inteiro', () => {
+  const all = booksFromCsv(fx('pg_catalog.csv').trimEnd() + '\n' + WORLD + '\n');
+
+  it('lê todos os textos com os idiomas, sem áudio', () => {
+    expect(all.map((b) => b.id)).not.toContain(99999);
+    expect(all.find((b) => b.id === 70000)?.langs).toEqual(['en', 'fr']);
+    expect(all).toHaveLength(14);
+  });
+
+  it('vitrine em inglês: famosos na ordem, uma edição de cada (a mais antiga)', () => {
+    const ids = searchBooks(all, '', 'en').map((b) => b.id);
+    expect(ids.slice(0, 4)).toEqual([1342, 84, 11, 5200]);
+    expect(ids).not.toContain(42671);
+    expect(ids).not.toContain(28885);
+    expect(ids).toContain(1);
+  });
+
+  it('busca sem acento em todos os idiomas, título exato antes', () => {
+    expect(searchBooks(all, 'casmurro', null).map((b) => b.id)).toEqual([55752]);
+    expect(searchBooks(all, 'pride and prejudice', null).map((b) => b.id)).toEqual([1342, 42671]);
+    expect(searchBooks(all, 'alice', 'en').map((b) => b.id)).toEqual([11, 28885]);
+    expect(searchBooks(all, 'kafka', null).map((b) => [b.id, b.lang])).toEqual([
+      [5200, 'en'],
+      [22367, 'de'],
+    ]);
+    expect(searchBooks(all, 'lusiadas', 'en')).toEqual([]);
+  });
+
+  it('rota busca usa o catálogo do espelho e conta o acervo', async () => {
+    const csv = Buffer.from(fx('pg_catalog.csv').trimEnd() + '\n' + WORLD + '\n', 'utf-8');
+    const m = await mirror({ '/cache/epub/feeds/pg_catalog.csv.gz': gzipSync(csv) });
+    try {
+      const r = await call('fn=busca&q=quijote&lang=todos');
+      const body = await r.json();
+      expect(r.status, JSON.stringify(body)).toBe(200);
+      expect(body.books[0]).toMatchObject({ id: 2000, title: 'Don Quijote', lang: 'es' });
+      expect(body.all).toBe(14);
+      const pt = await (await call('fn=catalog')).json();
+      expect(pt.books).toHaveLength(4);
+      expect(pt.total).toBe(14);
+      expect(m.log.filter((l) => l.startsWith('GET'))).toHaveLength(1);
+      expect((await call('fn=busca&lang=xx1')).status).toBe(400);
+    } finally {
+      await m.close();
+    }
   });
 });

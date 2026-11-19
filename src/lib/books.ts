@@ -153,11 +153,53 @@ export interface CatalogBook {
   id: number;
   title: string;
   authors: string[];
+  /** idioma principal (só vem na busca do acervo inteiro) */
+  lang?: string;
 }
 
-export async function loadCatalog(force = false): Promise<CatalogBook[]> {
-  const r = await cached<{ books: CatalogBook[] }>('catalogo-pt', 7 * 86_400_000, () => ponte('catalog'), { force });
-  return r.data.books;
+/** Clássicos em português (lista pequena, guardada no celular) e o tamanho do acervo inteiro. */
+export async function loadCatalog(force = false): Promise<{ books: CatalogBook[]; total: number | null }> {
+  const r = await cached<{ books: CatalogBook[]; total?: number }>('catalogo-pt', 7 * 86_400_000, () => ponte('catalog'), { force });
+  return { books: r.data.books, total: r.data.total ?? null };
+}
+
+/** Idiomas oferecidos na biblioteca. */
+export const BOOK_LANGS: [string, string][] = [
+  ['pt', 'Português'],
+  ['en', 'Inglês'],
+  ['es', 'Espanhol'],
+  ['fr', 'Francês'],
+  ['it', 'Italiano'],
+  ['de', 'Alemão'],
+  ['todos', 'Todos os idiomas'],
+];
+
+const LANG_NAMES: Record<string, string> = {
+  pt: 'Português', en: 'Inglês', es: 'Espanhol', fr: 'Francês', it: 'Italiano', de: 'Alemão', la: 'Latim',
+  fi: 'Finlandês', nl: 'Holandês', el: 'Grego', grc: 'Grego antigo', zh: 'Chinês', ja: 'Japonês', ru: 'Russo',
+  sv: 'Sueco', da: 'Dinamarquês', no: 'Norueguês', pl: 'Polonês', hu: 'Húngaro', ca: 'Catalão', eo: 'Esperanto',
+  cy: 'Galês', ga: 'Irlandês', tl: 'Tagalo', cs: 'Tcheco', ro: 'Romeno', is: 'Islandês', he: 'Hebraico',
+  ar: 'Árabe', ko: 'Coreano', af: 'Africâner', gl: 'Galego', ang: 'Inglês antigo', enm: 'Inglês médio',
+  fro: 'Francês antigo', oc: 'Occitano', sa: 'Sânscrito', yi: 'Iídiche', bg: 'Búlgaro', sr: 'Sérvio', sl: 'Esloveno',
+};
+
+export function langName(code?: string): string {
+  return code ? LANG_NAMES[code] ?? code.toUpperCase() : '';
+}
+
+export interface LibraryResult {
+  books: CatalogBook[];
+  /** livros no idioma escolhido */
+  total: number;
+  /** livros no acervo inteiro */
+  all: number;
+}
+
+/** Busca no Gutenberg inteiro pela ponte. Sem texto, devolve a vitrine do idioma (guardada por uma semana). */
+export async function searchLibrary(q: string, lang: string, signal?: AbortSignal): Promise<LibraryResult> {
+  const query = q.trim();
+  if (!query) return (await cached<LibraryResult>('vitrine:' + lang, 7 * 86_400_000, () => ponte('busca', { lang }, signal))).data;
+  return ponte<LibraryResult>('busca', { q: query, lang }, signal);
 }
 
 export function norm(s: string): string {

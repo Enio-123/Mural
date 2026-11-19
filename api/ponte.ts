@@ -10,6 +10,7 @@
  *   meta     url=<link da notícia>     -> { url, image, site }
  *   article  url=<link da notícia>     -> matéria limpa (Readability)
  *   catalog                            -> livros em português do Project Gutenberg
+ *   busca    q=<texto>&lang=en|todos   -> busca no Gutenberg inteiro (vitrine sem q)
  *   book     id=<número>               -> arquivo ePub
  *
  * Livros: o site www.gutenberg.org é só para pessoas e bloqueia acesso automático de
@@ -775,9 +776,35 @@ export interface CatalogBook {
   id: number;
   title: string;
   authors: string[];
+  lang?: string;
 }
 
-export function catalogFromCsv(text: string, lang = 'pt'): CatalogBook[] {
+/** Livro do catálogo inteiro, com os idiomas e o texto já preparado para a busca. */
+export interface FullBook {
+  id: number;
+  title: string;
+  authors: string[];
+  langs: string[];
+  /** título sem acentos, minúsculo */
+  nt: string;
+  /** título e autores sem acentos, minúsculos */
+  hay: string;
+  /** posição nas listas de obras famosas, por idioma da lista */
+  fam?: Record<string, number>;
+}
+
+export function normText(s: string): string {
+  return s
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/[^a-z0-9 ]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+/** Todos os textos do catálogo do Gutenberg (sem áudio, imagens etc.). */
+export function booksFromCsv(text: string): FullBook[] {
   const rows = parseCsv(text);
   if (!rows.length) return [];
   const head = rows[0].map((h) => h.trim().toLowerCase());
@@ -788,20 +815,163 @@ export function catalogFromCsv(text: string, lang = 'pt'): CatalogBook[] {
   const cLang = col('language');
   const cAuth = col('authors');
   if (cId < 0 || cTitle < 0 || cLang < 0) throw new PonteError('catalogo', 'O catálogo do Gutenberg mudou de formato.');
-  const out: CatalogBook[] = [];
+  const out: FullBook[] = [];
   for (let r = 1; r < rows.length; r++) {
     const row = rows[r];
     if (!row || row.length <= cLang) continue;
     if (cType >= 0 && row[cType] && row[cType] !== 'Text') continue;
-    const langs = row[cLang].split(/[;,]\s*/).map((s) => s.trim().toLowerCase());
-    if (!langs.includes(lang)) continue;
     const id = Number(row[cId]);
     if (!Number.isFinite(id) || id <= 0) continue;
     const title = row[cTitle].replace(/\s+/g, ' ').trim();
     if (!title) continue;
-    out.push({ id, title, authors: cAuth >= 0 ? cleanAuthors(row[cAuth] ?? '') : [] });
+    const langs = row[cLang]
+      .split(/[;,]\s*/)
+      .map((x) => x.trim().toLowerCase())
+      .filter(Boolean);
+    const authors = cAuth >= 0 ? cleanAuthors(row[cAuth] ?? '') : [];
+    const nt = normText(title);
+    out.push({ id, title, authors, langs, nt, hay: nt + ' ' + normText(authors.join(' ')), fam: famousOf(nt) });
   }
   return out;
+}
+
+export function catalogFromCsv(text: string, lang = 'pt'): CatalogBook[] {
+  return booksFromCsv(text)
+    .filter((b) => b.langs.includes(lang))
+    .map((b) => ({ id: b.id, title: b.title, authors: b.authors }));
+}
+
+/* Obras famosas por idioma, para a vitrine quando não há busca (o catálogo não traz popularidade). */
+const FAMOUS_BY_LANG: Record<string, string[]> = {
+  en: [
+    'pride and prejudice', 'frankenstein', 'alice s adventures in wonderland', 'moby dick', 'the adventures of sherlock holmes',
+    'dracula', 'the picture of dorian gray', 'a tale of two cities', 'the great gatsby', 'metamorphosis', 'jane eyre',
+    'wuthering heights', 'great expectations', 'the strange case of dr jekyll and mr hyde', 'the count of monte cristo',
+    'crime and punishment', 'war and peace', 'little women', 'treasure island', 'the adventures of tom sawyer',
+    'adventures of huckleberry finn', 'the odyssey', 'the iliad', 'romeo and juliet', 'hamlet', 'macbeth', 'the prince',
+    'the art of war', 'ulysses', 'a christmas carol', 'the time machine', 'the war of the worlds', 'the call of the wild',
+    'the jungle book', 'gulliver s travels', 'the life and adventures of robinson crusoe', 'heart of darkness', 'anna karenina',
+    'the brothers karamazov', 'emma', 'sense and sensibility', 'meditations', 'walden', 'the scarlet letter', 'peter pan',
+    'the wonderful wizard of oz', 'the hound of the baskervilles', 'dubliners', 'middlemarch', 'the yellow wallpaper',
+    'the secret garden', 'anne of green gables', 'the importance of being earnest', 'beowulf', 'the republic',
+  ],
+  es: [
+    'don quijote', 'la vida de lazarillo de tormes', 'la celestina', 'novelas ejemplares', 'la regenta', 'dona perfecta',
+    'marianela', 'fortunata y jacinta', 'pepita jimenez', 'el sombrero de tres picos', 'la vida es sueno', 'rimas',
+    'niebla', 'misericordia', 'trafalgar', 'el buscon', 'la gaviota', 'leyendas',
+  ],
+  fr: [
+    'les miserables', 'le comte de monte cristo', 'les trois mousquetaires', 'madame bovary', 'notre dame de paris',
+    'le rouge et le noir', 'candide', 'les fleurs du mal', 'vingt mille lieues sous les mers', 'le tour du monde en quatre vingts jours',
+    'germinal', 'bel ami', 'cyrano de bergerac', 'le pere goriot', 'les liaisons dangereuses', 'du cote de chez swann',
+    'l assommoir', 'nana', 'le misanthrope', 'tartuffe',
+  ],
+  de: [
+    'die verwandlung', 'der prozess', 'faust', 'die leiden des jungen werther', 'also sprach zarathustra', 'buddenbrooks',
+    'siddhartha', 'effi briest', 'kinder und hausmarchen', 'die rauber', 'wilhelm tell', 'nathan der weise', 'der zauberberg',
+    'kabale und liebe', 'emilia galotti',
+  ],
+  it: [
+    'la divina commedia', 'i promessi sposi', 'il principe', 'le avventure di pinocchio', 'il decameron', 'cuore',
+    'la coscienza di zeno', 'il fu mattia pascal', 'i malavoglia', 'orlando furioso', 'canzoniere', 'le mie prigioni',
+  ],
+  pt: [
+    'dom casmurro', 'memorias posthumas de braz cubas', 'memorias postumas de bras cubas', 'o cortico', 'iracema',
+    'o guarany', 'o guarani', 'os lusiadas', 'os sertoes', 'o atheneu', 'triste fim de policarpo quaresma', 'a moreninha',
+    'senhora', 'luciola', 'quincas borba', 'o alienista', 'a cidade e as serras', 'o primo bazilio', 'os maias',
+    'amor de perdicao', 'memorias de um sargento de milicias', 'a escrava isaura', 'helena', 'esau e jacob',
+    'o crime do padre amaro', 'innocencia',
+  ],
+};
+
+/** Na busca em todos os idiomas: português primeiro, depois os mais fáceis de ler para quem fala português. */
+const LANG_PREF = ['pt', 'en', 'es', 'fr', 'it', 'de', 'la'];
+function langRank(b: FullBook): number {
+  let best = LANG_PREF.length;
+  for (const l of b.langs) {
+    const i = LANG_PREF.indexOf(l);
+    if (i >= 0 && i < best) best = i;
+  }
+  return best;
+}
+
+let famousPrefixes: Map<string, { lang: string; i: number }[]> | null = null;
+
+/** Em quais listas de famosos o título aparece (título inteiro ou começo dele, em palavras inteiras). */
+function famousOf(nt: string): Record<string, number> | undefined {
+  if (!famousPrefixes) {
+    famousPrefixes = new Map();
+    for (const [lang, list] of Object.entries(FAMOUS_BY_LANG)) {
+      list.forEach((t, i) => {
+        const arr = famousPrefixes!.get(t) ?? [];
+        arr.push({ lang, i });
+        famousPrefixes!.set(t, arr);
+      });
+    }
+  }
+  let out: Record<string, number> | undefined;
+  const take = (c: string) => {
+    for (const h of famousPrefixes!.get(c) ?? []) {
+      out ??= {};
+      if (out[h.lang] === undefined || h.i < out[h.lang]) out[h.lang] = h.i;
+    }
+  };
+  take(nt);
+  for (let k = nt.indexOf(' '); k > 0; k = nt.indexOf(' ', k + 1)) take(nt.slice(0, k));
+  return out;
+}
+
+/** Melhor posição de famoso: na lista do idioma pedido ou, sem idioma, em qualquer lista. */
+function famous(b: FullBook, lang: string | null): { i: number; key: string } {
+  if (!b.fam) return { i: 999, key: '' };
+  if (lang) {
+    const i = b.fam[lang];
+    return i === undefined ? { i: 999, key: '' } : { i, key: lang + ':' + i };
+  }
+  let best = { i: 999, key: '' };
+  for (const [l, i] of Object.entries(b.fam)) {
+    if (!b.langs.includes(l)) continue;
+    if (i < best.i) best = { i, key: l + ':' + i };
+  }
+  return best;
+}
+
+/** Busca no catálogo inteiro: título exato, depois começo do título, depois palavras; famosos e números menores primeiro. */
+export function searchBooks(all: FullBook[], q: string, lang: string | null, limit = 60): CatalogBook[] {
+  const qn = normText(q);
+  const words = qn.split(' ').filter(Boolean);
+  const pool = lang ? all.filter((b) => b.langs.includes(lang)) : all;
+  type Hit = { b: FullBook; s: number; f: number; l: number };
+  let picked: Hit[];
+  if (!words.length) {
+    // vitrine: obras famosas, uma edição de cada (a de número menor), depois as mais antigas do acervo
+    const famousHits: (Hit & { key: string })[] = [];
+    for (const b of pool) {
+      const f = famous(b, lang);
+      if (f.i < 999) famousHits.push({ b, s: 0, f: f.i, l: langRank(b), key: f.key });
+    }
+    famousHits.sort((x, y) => x.f - y.f || x.l - y.l || x.b.id - y.b.id);
+    const seen = new Set<string>();
+    picked = famousHits.filter((x) => (seen.has(x.key) ? false : (seen.add(x.key), true)));
+    if (picked.length < limit) {
+      const chosen = new Set(picked.map((x) => x.b.id));
+      const rest = pool.filter((b) => !chosen.has(b.id) && famous(b, lang).i === 999).sort((x, y) => langRank(x) - langRank(y) || x.id - y.id);
+      for (const b of rest) {
+        if (picked.length >= limit) break;
+        picked.push({ b, s: 1, f: 999, l: 0 });
+      }
+    }
+  } else {
+    picked = [];
+    for (const b of pool) {
+      if (!words.every((w) => b.hay.includes(w))) continue;
+      const s = b.nt === qn ? 0 : b.nt.startsWith(qn) ? 1 : words.every((w) => b.nt.includes(w)) ? 2 : 3;
+      // em todos os idiomas o idioma conta antes da fama (as listas de famosos não se comparam entre si)
+      picked.push({ b, s, f: famous(b, lang).i < 999 ? 0 : 1, l: lang ? 0 : langRank(b) });
+    }
+    picked.sort((x, y) => x.s - y.s || x.l - y.l || x.f - y.f || x.b.id - y.b.id);
+  }
+  return picked.slice(0, limit).map(({ b }) => ({ id: b.id, title: b.title, authors: b.authors, lang: b.langs[0] }));
 }
 
 /** Espelho oficial do Project Gutenberg (PGLAF, hospedado pelo ibiblio). */
@@ -915,15 +1085,32 @@ export async function downloadInParts(raw: string, deadline: number, maxBytes = 
   return Buffer.concat(bufs);
 }
 
-let catalogMemo: { at: number; data: { books: CatalogBook[]; fetchedAt: string } } | null = null;
+let fullMemo: { at: number; books: FullBook[] } | null = null;
+let fullLoading: Promise<FullBook[]> | null = null;
 
 /** Só para os testes. */
 export function resetCatalogCache(): void {
-  catalogMemo = null;
+  fullMemo = null;
+  fullLoading = null;
 }
 
-async function catalog() {
-  if (catalogMemo && Date.now() - catalogMemo.at < 6 * 3_600_000) return catalogMemo.data;
+/** O catálogo inteiro, baixado uma vez e guardado na memória da função por 6 horas. */
+function fullCatalog(): Promise<FullBook[]> {
+  if (fullMemo && Date.now() - fullMemo.at < 6 * 3_600_000) return Promise.resolve(fullMemo.books);
+  if (!fullLoading) {
+    fullLoading = loadFullCatalog()
+      .then((books) => {
+        fullMemo = { at: Date.now(), books };
+        return books;
+      })
+      .finally(() => {
+        fullLoading = null;
+      });
+  }
+  return fullLoading;
+}
+
+async function loadFullCatalog(): Promise<FullBook[]> {
   const deadline = Date.now() + (Number(process.env.PONTE_CATALOG_MS) || 50_000);
   let lastError: unknown = null;
   for (const name of ['pg_catalog.csv.gz', 'pg_catalog.csv']) {
@@ -937,16 +1124,33 @@ async function catalog() {
       lastError = e instanceof PonteError ? e : new PonteError('catalogo', 'O catálogo do Gutenberg chegou estragado.');
       continue;
     }
-    const books = catalogFromCsv(new TextDecoder('utf-8').decode(raw));
-    if (!books.length) throw new PonteError('catalogo', 'Não achei livros em português no catálogo.');
-    const data = { books, fetchedAt: new Date().toISOString() };
-    catalogMemo = { at: Date.now(), data };
-    return data;
+    const books = booksFromCsv(new TextDecoder('utf-8').decode(raw));
+    if (!books.length) throw new PonteError('catalogo', 'O catálogo do Gutenberg veio vazio.');
+    return books;
   }
   if (lastError instanceof PonteError && lastError.code === 'tempo') {
     throw new PonteError('tempo', 'O espelho do Gutenberg demorou demais pra mandar o catálogo. Tente de novo daqui a pouco.', 504);
   }
   throw lastError ?? new PonteError('tempo', 'O espelho do Gutenberg demorou demais pra mandar o catálogo.', 504);
+}
+
+async function catalog() {
+  const all = await fullCatalog();
+  const books = all.filter((b) => b.langs.includes('pt')).map((b) => ({ id: b.id, title: b.title, authors: b.authors }));
+  if (!books.length) throw new PonteError('catalogo', 'Não achei livros em português no catálogo.');
+  return { books, total: all.length, fetchedAt: new Date().toISOString() };
+}
+
+const LANG_OK = /^[a-z]{2,3}$/;
+
+async function busca(p: URLSearchParams) {
+  const q = (p.get('q') ?? '').trim().slice(0, 100);
+  const raw = (p.get('lang') ?? '').trim().toLowerCase();
+  const lang = raw && raw !== 'todos' ? raw : null;
+  if (lang && !LANG_OK.test(lang)) throw new PonteError('param', 'Idioma inválido.', 400);
+  const all = await fullCatalog();
+  const total = lang ? all.reduce((n, b) => n + (b.langs.includes(lang) ? 1 : 0), 0) : all.length;
+  return { books: searchBooks(all, q, lang), total, all: all.length };
 }
 
 async function book(p: URLSearchParams): Promise<Response> {
@@ -1032,6 +1236,8 @@ export async function GET(request: Request): Promise<Response> {
         return json(await article(p), 21600);
       case 'catalog':
         return json(await catalog(), 86400);
+      case 'busca':
+        return json(await busca(p), 86400);
       case 'book':
         return await book(p);
       case 'bsky':

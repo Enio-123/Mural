@@ -237,6 +237,32 @@ const phone = { ...devices['Pixel 7'], locale: 'pt-BR', timezoneId: 'America/For
   const saved = await page.evaluate(() => JSON.parse(localStorage.getItem('mural:livros') || '[]')[0]);
   check(!!saved?.cfi, 'posição de leitura guardada (' + (saved?.chapter ?? '') + ')');
 
+  /* biblioteca inteira: idiomas e busca */
+  const lib = topScreen(page);
+  check(/78\.512 livros/.test(await lib.locator('.lib-count').innerText()), 'mostra o tamanho do acervo (78.512 livros)');
+  await lib.getByRole('button', { name: 'Inglês', exact: true }).click();
+  await lib.locator('.book-text b', { hasText: 'Pride and Prejudice' }).waitFor();
+  check((await lib.locator('.book-row').count()) === 5, 'vitrine em inglês vem da biblioteca inteira');
+  await shot(page, 'biblioteca-ingles');
+  await lib.getByRole('searchbox').fill('kafka');
+  await lib.locator('.book-text b', { hasText: 'Metamorphosis' }).waitFor();
+  await page.waitForTimeout(500);
+  check((await lib.locator('.book-row').count()) === 1, 'busca em inglês filtra pelo idioma');
+  await lib.getByRole('button', { name: 'Todos os idiomas' }).click();
+  await lib.locator('.book-text b', { hasText: 'Die Verwandlung' }).waitFor();
+  check((await lib.locator('.lang-tag').allInnerTexts()).join(',') === 'Inglês,Alemão', 'em todos os idiomas cada livro mostra o idioma');
+  await shot(page, 'biblioteca-todos');
+  await noSideScroll(page, 'biblioteca');
+  await lib.getByRole('button', { name: 'Português', exact: true }).click();
+  await lib.getByRole('searchbox').fill('machado');
+  await lib.locator('.book-text b', { hasText: 'Quincas Borba' }).waitFor();
+  await lib.getByRole('button', { name: /Procurar “machado” em todos os idiomas/ }).click();
+  await page.waitForTimeout(600);
+  check((await lib.getByRole('button', { name: 'Todos os idiomas' }).getAttribute('aria-pressed')) === 'true', 'botão leva a busca do português para todos os idiomas');
+  await lib.getByRole('searchbox').fill('');
+  await lib.getByRole('button', { name: 'Português', exact: true }).click();
+  await lib.locator('.book-text b', { hasText: 'Dom Casmurro' }).waitFor();
+
   /* baixar um clássico */
   await topScreen(page).locator('.book-row').first().click();
   await page.locator('.reader iframe').waitFor({ timeout: 10000 });

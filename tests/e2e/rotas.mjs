@@ -17,6 +17,7 @@ export async function routes(ctx, BASE, epub) {
       if (fn === 'meta') return json({ image: null });
       if (fn === 'article') return json(D.article);
       if (fn === 'catalog') return json(D.catalog);
+      if (fn === 'busca') return json(D.library(url.searchParams.get('q'), url.searchParams.get('lang')));
       if (fn === 'book') return route.fulfill({ status: 200, contentType: 'application/epub+zip', body: epub });
       if (fn === 'bsky') return json(D.bskyFeed);
       return json({ error: { code: 'fn', message: 'desconhecida' } }, 400);
